@@ -1,72 +1,70 @@
-import Redis from "ioredis";
+import { Redis } from "ioredis";
+import { config } from "../config.js";
 import { MemRedis } from "./memredis.js";
 
-// Em modo sem Docker o Redis pode não existir: tenta conexão rápida e,
-// se falhar, usa MemRedis (em memória, mesma API usada pelo projeto).
-const url = process.env.REDIS_URL ?? "redis://localhost:6379";
-
-type AnyRedis = Redis;
-
-let backing: AnyRedis;
-let memMode = false;
-
-async function connectWithTimeout(client: Redis, ms: number): Promise<boolean> {
+async function ping(client: Redis, ms: number): Promise<boolean> {
   try {
-    const pong = await Promise.race([
-      client.ping(),
-      new Promise<string>((_, rej) => setTimeout(() => rej(new Error("timeout")), ms)),
-    ]);
+    const pong = await Promise.race([client.ping(), new Promise<string>((_, rej) => setTimeout(() => rej(new Error("timeout")), ms))]);
     return pong === "PONG";
   } catch {
     return false;
   }
 }
 
-async function boot(): Promise<AnyRedis> {
-  const client = new Redis(url, {
-    maxRetriesPerRequest: 1,
-    retryStrategy: () => null,
-    enableReadyCheck: false,
-    lazyConnect: false,
+/** Redis real. Em produção falha alto; fora dela cai para MemRedis (modo sem Docker). */
+async function boot(): Promise<Redis> {
+  const client = new Redis(config.REDIS_URL, {
+    maxRetriesPerRequest: 2,
+    // Produção: reconecta com backoff; dev: desiste rápido e usa memória.
+    retryStrategy: config.isProd ? (n) => Math.min(n * 200, 5000) : () => null,
+    enableReadyCheck: true,
   });
-  client.on("error", () => undefined);
-  if (await connectWithTimeout(client, 2000)) {
-    console.log("[redis] conectado em", url);
+  client.on("error", (e) => {
+    if (config.isProd) console.error("[redis]", e.message);
+  });
+  if (await ping(client, 3000)) {
+    console.log("[redis] conectado");
     return client;
   }
-  try {
-    client.disconnect();
-  } catch {
-    /* noop */
-  }
-  memMode = true;
-  console.log("[redis] indisponível — usando MemRedis (modo sem Docker)");
-  return new MemRedis() as unknown as AnyRedis;
+  if (config.isProd) throw new Error("Redis indisponível em produção");
+  client.disconnect();
+  console.warn("[redis] indisponível — usando MemRedis (só dev)");
+  return new MemRedis() as unknown as Redis;
 }
 
-export const redis: AnyRedis = await boot();
-
-export function getRedis(): AnyRedis {
-  return redis;
-}
-
-export function isMemMode(): boolean {
-  return memMode;
-}
-
-/** Publica evento para o gateway consumir (message:create, etc). */
-export async function publish(channel: string, payload: unknown): Promise<void> {
-  try {
-    await redis.publish(channel, JSON.stringify(payload));
-  } catch (err) {
-    console.error("[redis] publish failed", channel, err);
-  }
-}
+export const redis: Redis = await boot();
+export const EVENTS_CHANNEL = process.env.EVENTS_CHANNEL ?? "vekrom:events";
 
 export async function redisHealth(): Promise<boolean> {
+  return ping(redis, 1000);
+}
+
+/**
+ * Evento para o gateway. Um canal só: o gateway roteia por serverId ou userIds.
+ * `addMember`/`removeMember` atualizam a lista de servidores das sessões abertas.
+ */
+export interface GatewayEvent {
+  t: string;
+  d: unknown;
+  serverId?: string;
+  userIds?: string[];
+  addMember?: string;
+  removeMember?: string;
+}
+
+export async function publish(evt: GatewayEvent): Promise<void> {
   try {
-    return (await redis.ping()) === "PONG";
-  } catch {
-    return false;
+    await redis.publish(EVENTS_CHANNEL, JSON.stringify(evt));
+  } catch (err) {
+    console.error("[redis] publish falhou", evt.t, (err as Error).message);
   }
+}
+
+/** Presença atual (gravada pelo gateway com TTL). */
+export async function presenceOf(ids: string[]): Promise<Record<string, string>> {
+  if (ids.length === 0) return {};
+  const vals = await redis.mget(...ids.map((id) => `presence:${id}`)).catch(() => [] as (string | null)[]);
+  const out: Record<string, string> = {};
+  ids.forEach((id, i) => (out[id] = vals[i] ?? "offline"));
+  return out;
 }

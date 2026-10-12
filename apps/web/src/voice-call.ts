@@ -1,16 +1,24 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { gateway } from "./lib/ws";
-import { useAuth, useVoice } from "./stores";
+import { api } from "./lib/api";
+import { useSession, useVoice } from "./lib/store";
 
 /**
  * Mesh WebRTC (P2P) com sinalização via gateway (VOICE_SIGNAL).
  * - Câmera+mic: getUserMedia; tela: getDisplayMedia
  * - 1 RTCPeerConnection por par (scope "cam") + 1 por tela (scope "screen")
  * - Quem entra no canal oferta "cam" p/ quem já está; quem inicia a tela oferta "screen"
- * - STUN público; em produção use o coturn (infra/docker-compose.yml)
+ * - ICE vem da API (/voice/ice): STUN + TURN com credencial temporária quando o coturn estiver ligado
  */
 
 const ICE: RTCConfiguration = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
+async function loadIce() {
+  try {
+    ICE.iceServers = await api.ice();
+  } catch {
+    /* fica só com STUN */
+  }
+}
 type Scope = "cam" | "screen";
 
 export interface RemotePeer {
@@ -40,7 +48,7 @@ export interface ScreenShareOptions {
 }
 
 export function useVoiceCall(channelId: string | null) {
-  const userId = useAuth((s) => s.userId);
+  const userId = useSession((s) => s.user?.id ?? null);
   const [localCam, setLocalCam] = useState<MediaStream | null>(null);
   const [localScreen, setLocalScreen] = useState<MediaStream | null>(null);
   const [remotes, setRemotes] = useState<Record<string, RemotePeer>>({});
@@ -246,6 +254,7 @@ export function useVoiceCall(channelId: string | null) {
       // Create and resume the analyser during the join click, before the
       // microphone permission prompt can consume the browser's user activation.
       await prepareSpeechContext();
+      await loadIce();
       ctx = speechContext.current;
       if (!ctx || ctx.state === "closed") throw new Error("AudioContext unavailable");
       const cam = await navigator.mediaDevices.getUserMedia({
@@ -265,12 +274,15 @@ export function useVoiceCall(channelId: string | null) {
       useVoice.getState().setVideo(false);
       watchSpeaking(cam, ctx);
       setStarted(true);
-      gateway.send("VOICE_STATE_UPDATE", { channelId: chanRef.current, camera: false, sharing: false });
+      gateway.send("VOICE_STATE_UPDATE", { channelId: chanRef.current, camera: false, sharing: false, mute: useVoice.getState().muted, deaf: useVoice.getState().deafened });
     } catch {
       startedRef.current = false;
       if (ctx) void ctx.close().catch(() => undefined);
       if (speechContext.current === ctx) speechContext.current = null;
-      setError("Não foi possível acessar o microfone. Verifique as permissões do navegador.");
+      setError("Sem acesso ao microfone: você entrou só para ouvir. Libere o microfone no navegador para falar.");
+      // Entra mesmo assim, mudo (dá para ouvir e ver telas).
+      if (!useVoice.getState().muted) useVoice.setState({ muted: true });
+      gateway.send("VOICE_STATE_UPDATE", { channelId: chanRef.current, mute: true, deaf: useVoice.getState().deafened });
     }
   }, [prepareSpeechContext, watchSpeaking]);
 

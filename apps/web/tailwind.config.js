@@ -1,60 +1,34 @@
 /** @type {import('tailwindcss').Config} */
+const v = (name) => `rgb(var(--${name}) / <alpha-value>)`;
 export default {
   content: ['./index.html', './src/**/*.{ts,tsx}'],
-  darkMode: 'class',
+  future: { hoverOnlyWhenSupported: true },
   theme: {
     extend: {
       colors: {
-        dark: {
-          950: '#07080a',
-          900: '#0d0e12',
-          850: '#12141a',
-          800: '#171922',
-          750: '#1e212c',
-          700: '#252936',
-          600: '#323748',
-          500: '#464c62',
-        },
-        brand: {
-          blue: '#2d6cf6',
-          blueHover: '#1d57db',
-          blueLight: '#4d83ff',
-          live: '#ff2e56',
-        },
-        discord: {
-          bg: '#0d0e12',
-          sidebar: '#12141a',
-          servers: '#07080a',
-          hover: '#1e212c',
-          active: '#252936',
-          text: '#e2e5eb',
-          muted: '#8c93a4',
-          brand: '#2d6cf6',
-          brandHover: '#1d57db',
-          green: '#10b981',
-          red: '#ff2e56',
-          yellow: '#f59e0b',
-        },
+        bg: { 0: v('bg-0'), 1: v('bg-1'), 2: v('bg-2'), 3: v('bg-3'), 4: v('bg-4') },
+        ink: { 1: v('ink-1'), 2: v('ink-2'), 3: v('ink-3'), 4: v('ink-4') },
+        volt: { DEFAULT: v('volt'), ink: v('volt-ink') },
+        danger: v('danger'),
+        warn: v('warn'),
+        online: v('online'),
+        live: v('live'),
+        line: 'rgb(255 255 255 / 0.07)',
+        'line-strong': 'rgb(255 255 255 / 0.12)',
       },
       fontFamily: {
-        sans: ['"Plus Jakarta Sans"', 'Inter', 'system-ui', 'sans-serif'],
-        mono: ['"JetBrains Mono"', 'monospace'],
+        sans: ['Geist', 'system-ui', '-apple-system', 'Segoe UI', 'sans-serif'],
+        display: ['Unbounded', 'Geist', 'system-ui', 'sans-serif'],
+        mono: ['"Geist Mono"', 'ui-monospace', 'monospace'],
       },
-      minHeight: {
-        dvh: '100dvh',
+      borderRadius: { sm: '6px', DEFAULT: '8px', md: '10px', lg: '12px', xl: '16px', '2xl': '20px' },
+      boxShadow: {
+        pop: '0 16px 40px -12px rgb(0 0 0 / 0.7), 0 0 0 1px rgb(255 255 255 / 0.08)',
+        glow: '0 0 0 1px rgb(198 244 50 / 0.45), 0 0 24px -6px rgb(198 244 50 / 0.45)',
+        inset: 'inset 0 1px 0 rgb(255 255 255 / 0.05)',
       },
-      height: {
-        dvh: '100dvh',
-      },
-      keyframes: {
-        pulseGlow: {
-          '0%, 100%': { opacity: '1', transform: 'scale(1)' },
-          '50%': { opacity: '0.65', transform: 'scale(1.08)' },
-        },
-      },
-      animation: {
-        'pulse-glow': 'pulseGlow 2s cubic-bezier(0.4, 0, 0.6, 1) infinite',
-      },
+      transitionTimingFunction: { out: 'cubic-bezier(0.23, 1, 0.32, 1)', drawer: 'cubic-bezier(0.32, 0.72, 0, 1)' },
+      height: { dvh: '100dvh' },
     },
   },
   plugins: [],

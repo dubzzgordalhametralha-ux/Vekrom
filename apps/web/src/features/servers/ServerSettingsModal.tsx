@@ -1,99 +1,216 @@
-import { useRef, useState } from "react";
-import { Camera, Check, ChevronLeft, ImagePlus, LogOut, Save, Settings, Shield, Users, X } from "lucide-react";
-import type { Server } from "../../lib/api";
-import type { ServerRole } from "../../stores";
-import { ServerRolesPanel } from "./ServerRolesPanel";
+import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { useQueryClient } from "@tanstack/react-query";
+import { Plus, Shield, Trash2 } from "lucide-react";
+import { api, type Role, type Server } from "../../lib/api";
+import { can, PERM, PERM_LABELS } from "../../lib/permissions";
+import { useRoles } from "../../lib/queries";
+import { toast, toastError, useSession } from "../../lib/store";
+import { Modal, Spinner } from "../../components/ui";
+import { roleColor } from "../members/MemberList";
+import { ImagePicker } from "./ServerModals";
 
-type ServerSettingsModalProps = {
-  isOpen: boolean;
-  server: Server;
-  isOwner: boolean;
-  canEditServer: boolean;
-  onClose: () => void;
-  onSave: (data: { name: string; iconUrl: string | null; description: string }) => void;
-  onLeave: () => void;
-  roles: ServerRole[];
-  members: Array<{ id: string; username: string }>;
-  onCreateRole: (name: string) => ServerRole;
-  onSaveRole: (roleId: string, data: Partial<Pick<ServerRole, "name" | "color" | "permissions">>) => void;
-  onDeleteRole: (roleId: string) => void;
-  onToggleRoleMember: (roleId: string, memberId: string) => void;
-};
+const SWATCHES = [0xc6f432, 0x3ddc84, 0x3bc9ff, 0x6b8cff, 0xa98bff, 0xff6bcb, 0xff4d5e, 0xff9f43, 0xf5b83d, 0x8a8fa0];
 
-const sections = [
-  { id: "profile", title: "Perfil do servidor", icon: ImagePlus },
-  { id: "members", title: "Membros", icon: Users },
-  { id: "roles", title: "Cargos", icon: Shield },
-  { id: "access", title: "Acesso e permissões", icon: Shield },
-];
+function Toggle({ on, onChange, label, hint, disabled }: { on: boolean; onChange: (v: boolean) => void; label: string; hint: string; disabled?: boolean }) {
+  return (
+    <label className={`flex items-center gap-3 border-t border-line py-3 first:border-t-0 ${disabled ? "opacity-50" : "cursor-pointer"}`}>
+      <span className="min-w-0 flex-1">
+        <span className="block text-[14px] font-medium">{label}</span>
+        <span className="block text-[12px] text-ink-3">{hint}</span>
+      </span>
+      <input type="checkbox" className="peer sr-only" checked={on} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
+      <span aria-hidden className="relative h-6 w-10 shrink-0 rounded-full bg-bg-4 ring-1 ring-inset ring-white/10 transition-colors duration-150 peer-checked:bg-volt peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-volt after:absolute after:left-0.5 after:top-0.5 after:h-5 after:w-5 after:rounded-full after:bg-white after:shadow after:transition-transform after:duration-200 after:ease-out peer-checked:after:translate-x-4 peer-checked:after:bg-volt-ink" />
+    </label>
+  );
+}
 
-export function ServerSettingsModal({ isOpen, server, isOwner, canEditServer, onClose, onSave, onLeave, roles, members, onCreateRole, onSaveRole, onDeleteRole, onToggleRoleMember }: ServerSettingsModalProps) {
-  const [section, setSection] = useState("profile");
-  const [name, setName] = useState(server.name);
-  const [description, setDescription] = useState(server.description ?? "");
-  const [iconUrl, setIconUrl] = useState(server.iconUrl);
-  const [notice, setNotice] = useState("");
-  const fileRef = useRef<HTMLInputElement>(null);
+function RolesTab({ server }: { server: Server }) {
+  const qc = useQueryClient();
+  const { data: roles = [], isPending } = useRoles(server.id);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [draft, setDraft] = useState<Role | null>(null);
+  const isOwner = server.ownerId === useSession.getState().user?.id;
+  const role = roles.find((r) => r.id === selected) ?? roles.find((r) => r.name !== "@everyone") ?? roles[0];
 
-  if (!isOpen) return null;
+  useEffect(() => setDraft(role ? { ...role } : null), [role?.id, role?.permissions, role?.name, role?.color]); // eslint-disable-line react-hooks/exhaustive-deps
+  const refresh = () => qc.invalidateQueries({ queryKey: ["roles", server.id] });
 
-  const save = () => {
-    onSave({ name: name.trim() || server.name, description: description.trim(), iconUrl });
-    setNotice("Alterações salvas neste dispositivo.");
-    window.setTimeout(() => setNotice(""), 2500);
+  const create = async () => {
+    try {
+      const r = await api.createRole(server.id, { name: "novo cargo", color: SWATCHES[roles.length % SWATCHES.length] });
+      await refresh();
+      setSelected(r.role.id);
+    } catch (e) {
+      toastError(e);
+    }
+  };
+  const save = async () => {
+    if (!draft) return;
+    try {
+      await api.updateRole(server.id, draft.id, { name: draft.name === "@everyone" ? undefined : draft.name, permissions: draft.permissions, color: draft.color });
+      await refresh();
+      void qc.invalidateQueries({ queryKey: ["servers"] });
+      toast("Cargo salvo.", "success");
+    } catch (e) {
+      toastError(e);
+    }
+  };
+  const remove = async () => {
+    if (!draft || !confirm(`Excluir o cargo ${draft.name}?`)) return;
+    try {
+      await api.deleteRole(server.id, draft.id);
+      setSelected(null);
+      await refresh();
+    } catch (e) {
+      toastError(e);
+    }
   };
 
-  const chooseIcon = (file?: File) => {
-    if (!file || !file.type.startsWith("image/")) return;
-    const reader = new FileReader();
-    reader.onload = () => setIconUrl(String(reader.result));
-    reader.readAsDataURL(file);
+  if (isPending) return <div className="skeleton h-48 rounded-lg" />;
+  const dirty = draft && role && (draft.name !== role.name || draft.permissions !== role.permissions || draft.color !== role.color);
+  const everyone = draft?.name === "@everyone";
+
+  return (
+    <div className="grid gap-5 sm:grid-cols-[180px_1fr]">
+      <div>
+        <div className="flex gap-1.5 overflow-x-auto pb-1 sm:flex-col sm:overflow-visible">
+          {[...roles].sort((a, b) => b.position - a.position).map((r) => (
+            <button key={r.id} onClick={() => setSelected(r.id)} data-active={r.id === role?.id} className="row h-9 shrink-0 gap-2 text-[13px] sm:w-full">
+              <span className="h-3 w-3 shrink-0 rounded-full" style={{ background: roleColor(r) ?? "rgb(var(--ink-4))" }} />
+              <span className="truncate">{r.name === "@everyone" ? "Todo mundo" : r.name}</span>
+            </button>
+          ))}
+        </div>
+        <button className="btn btn-ghost mt-2 h-9 w-full text-[13px]" onClick={() => void create()}>
+          <Plus size={15} /> Novo cargo
+        </button>
+      </div>
+      {draft && (
+        <div>
+          {!everyone && (
+            <div className="space-y-4">
+              <div>
+                <label htmlFor="role-name" className="label">Nome</label>
+                <input id="role-name" className="field" value={draft.name} maxLength={50} onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
+              </div>
+              <div>
+                <span className="label">Cor</span>
+                <div className="flex flex-wrap gap-2">
+                  {SWATCHES.map((c) => (
+                    <button key={c} onClick={() => setDraft({ ...draft, color: c })} aria-label={`Cor #${c.toString(16)}`} aria-pressed={draft.color === c} className={`h-8 w-8 rounded-full transition-transform duration-150 active:scale-90 ${draft.color === c ? "ring-2 ring-white ring-offset-2 ring-offset-bg-2" : ""}`} style={{ background: `#${c.toString(16).padStart(6, "0")}` }} />
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+          {everyone && <p className="mb-2 text-[13px] text-ink-3">Vale para todo membro do servidor.</p>}
+          <p className="section-label mb-1 mt-5">Permissões</p>
+          <div>
+            {PERM_LABELS.map((p) => (
+              <Toggle
+                key={p.bit}
+                label={p.label}
+                hint={p.hint}
+                on={(draft.permissions & p.bit) === p.bit}
+                disabled={!isOwner && (p.bit === PERM.ADMINISTRATOR || !can(server.permissions, p.bit))}
+                onChange={(v) => setDraft({ ...draft, permissions: v ? draft.permissions | p.bit : draft.permissions & ~p.bit })}
+              />
+            ))}
+          </div>
+          <p className="mt-3 text-[12px] text-ink-4">Para dar o cargo a alguém, abra o perfil da pessoa na lista de membros.</p>
+          <div className="mt-5 flex gap-2">
+            {!everyone && <button className="btn btn-danger" onClick={() => void remove()}><Trash2 size={15} /> Excluir</button>}
+            <button className="btn btn-primary ml-auto" disabled={!dirty} onClick={() => void save()}>Salvar cargo</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function ServerSettingsModal({ server, onClose }: { server: Server; onClose: () => void }) {
+  const me = useSession((s) => s.user)!;
+  const isOwner = server.ownerId === me.id;
+  const tabs = [
+    can(server.permissions, PERM.MANAGE_SERVER) && { id: "overview", label: "Visão geral" },
+    can(server.permissions, PERM.MANAGE_ROLES) && { id: "roles", label: "Cargos" },
+    isOwner && { id: "danger", label: "Excluir" },
+  ].filter(Boolean) as Array<{ id: string; label: string }>;
+  const [tab, setTab] = useState(tabs[0]?.id ?? "overview");
+  const [name, setName] = useState(server.name);
+  const [icon, setIcon] = useState(server.iconUrl);
+  const [busy, setBusy] = useState(false);
+  const [confirmName, setConfirmName] = useState("");
+  const qc = useQueryClient();
+  const nav = useNavigate();
+
+  const saveOverview = async () => {
+    setBusy(true);
+    try {
+      await api.updateServer(server.id, { name, iconUrl: icon });
+      await qc.invalidateQueries({ queryKey: ["servers"] });
+      toast("Servidor salvo.", "success");
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const destroy = async () => {
+    try {
+      await api.deleteServer(server.id);
+      await qc.invalidateQueries({ queryKey: ["servers"] });
+      nav("/channels/@me");
+      onClose();
+    } catch (e) {
+      toastError(e);
+    }
   };
 
   return (
-    <div className="fixed inset-0 z-[100] flex bg-[#1e1f22] text-[#dbdee1]">
-      <button className="absolute right-6 top-5 z-10 rounded-full border-2 border-zinc-500 p-2 text-zinc-400 hover:text-white" onClick={onClose} aria-label="Fechar configurações"><X size={19} /></button>
-      <aside className="hidden w-[280px] shrink-0 flex-col bg-[#17181b] px-6 py-8 md:flex">
-        <div className="mb-7 px-2 text-xs font-bold uppercase tracking-wider text-zinc-400">{server.name}</div>
-        {sections.map(({ id, title, icon: Icon }) => (
-          <button key={id} onClick={() => setSection(id)} className={`flex items-center gap-3 rounded-md px-3 py-2.5 text-left text-sm ${section === id ? "bg-[#303136] text-white" : "text-zinc-300 hover:bg-white/[0.05]"}`}>
-            <Icon size={16} /> {title}
+    <Modal open wide onOpenChange={(o) => !o && onClose()} title="Configurações do servidor" description={server.name}>
+      <div role="tablist" className="mb-5 flex gap-1 border-b border-line">
+        {tabs.map((t) => (
+          <button key={t.id} role="tab" aria-selected={tab === t.id} onClick={() => setTab(t.id)} className={`-mb-px border-b-2 px-3 pb-2.5 pt-1 text-[13px] font-semibold transition-colors ${tab === t.id ? "border-volt text-ink-1" : "border-transparent text-ink-3 hover:text-ink-1"}`}>
+            {t.label}
           </button>
         ))}
-        <div className="my-5 border-t border-white/[0.08]" />
-        <button onClick={onLeave} className="flex items-center gap-3 rounded-md px-3 py-2.5 text-left text-sm text-rose-400 hover:bg-rose-500/10"><LogOut size={16} /> Sair do servidor</button>
-      </aside>
-
-      <main className="min-w-0 flex-1 overflow-y-auto px-5 pb-10 pt-16 sm:px-10 md:pt-10">
-        <div className="mx-auto max-w-4xl">
-          <button onClick={onClose} className="mb-5 flex items-center gap-1 text-sm text-zinc-400 hover:text-white md:hidden"><ChevronLeft size={17} /> Voltar</button>
-          <div className="mb-8 flex items-center gap-3"><Settings size={21} className="text-indigo-400"/><div><h1 className="text-xl font-bold text-white">Configurações do servidor</h1><p className="text-sm text-zinc-400">Gerencie a identidade e o acesso de {server.name}.</p></div></div>
-          <nav className="mb-6 flex gap-2 overflow-x-auto md:hidden">{sections.map(({ id, title }) => <button key={id} onClick={() => setSection(id)} className={`shrink-0 rounded-full px-3 py-2 text-xs ${section === id ? "bg-indigo-500 text-white" : "bg-[#303136] text-zinc-300"}`}>{title}</button>)}</nav>
-
-          {section === "profile" && <section className="max-w-2xl space-y-7">
-            <div><h2 className="text-lg font-semibold text-white">Perfil do servidor</h2><p className="mt-1 text-sm text-zinc-400">Personalize como sua comunidade aparece para os membros.</p></div>
-            <label className="block text-sm font-semibold text-white">Nome do servidor<input value={name} onChange={(e) => setName(e.target.value)} disabled={!canEditServer} maxLength={80} className="mt-2 block w-full rounded-lg border border-white/10 bg-[#17181b] px-3.5 py-3 font-normal text-white outline-none focus:border-indigo-400 disabled:opacity-60" /></label>
-            <label className="block text-sm font-semibold text-white">Descrição<textarea value={description} onChange={(e) => setDescription(e.target.value)} disabled={!canEditServer} rows={3} maxLength={300} placeholder="Conte um pouco sobre este servidor" className="mt-2 block w-full resize-none rounded-lg border border-white/10 bg-[#17181b] px-3.5 py-3 font-normal text-white outline-none placeholder:text-zinc-500 focus:border-indigo-400 disabled:opacity-60"/><span className="mt-1 block text-xs font-normal text-zinc-500">{description.length}/300</span></label>
-            <div className="border-t border-white/10 pt-6"><h3 className="font-semibold text-white">Ícone do servidor</h3><p className="mt-1 text-sm text-zinc-400">Escolha uma imagem para identificar seu servidor.</p><div className="mt-4 flex flex-wrap items-center gap-4">
-              <div className="grid h-20 w-20 place-items-center overflow-hidden rounded-2xl bg-[#303136] text-xl font-bold text-white">{iconUrl ? <img src={iconUrl} alt="Ícone do servidor" className="h-full w-full object-cover"/> : server.name.slice(0,2).toUpperCase()}</div>
-              <input ref={fileRef} type="file" accept="image/png,image/jpeg,image/webp,image/gif" className="hidden" onChange={(e) => chooseIcon(e.target.files?.[0])}/>
-              <div className="flex gap-2"><button disabled={!canEditServer} onClick={() => fileRef.current?.click()} className="flex items-center gap-2 rounded-md bg-indigo-500 px-4 py-2.5 text-sm font-semibold text-white hover:bg-indigo-400 disabled:opacity-50"><Camera size={16}/> Alterar ícone</button>{iconUrl && <button disabled={!canEditServer} onClick={() => setIconUrl(null)} className="rounded-md bg-[#303136] px-4 py-2.5 text-sm text-rose-300 hover:bg-[#3a3b40] disabled:opacity-50">Remover</button>}</div>
-            </div></div>
-            {!canEditServer && <p className="rounded-lg border border-amber-400/20 bg-amber-400/5 p-3 text-sm text-amber-200">Seu cargo não permite alterar o nome, a descrição ou o ícone.</p>}
-          </section>}
-
-          {section === "members" && <section className="max-w-2xl"><h2 className="text-lg font-semibold text-white">Membros</h2><div className="mt-4 rounded-xl border border-white/[0.08] bg-[#232428] p-5"><div className="flex items-center gap-3"><div className="grid h-10 w-10 place-items-center rounded-full bg-indigo-500/20 text-indigo-300"><Users size={18}/></div><div><p className="font-semibold text-white">Membros do servidor</p><p className="text-sm text-zinc-400">Atribua cargos pela aba Cargos do servidor.</p></div></div><div className="mt-5 border-t border-white/10 pt-4 text-sm text-zinc-300">{members.length} membros disponíveis para atribuição de cargos.</div></div></section>}
-
-          {section === "roles" && <section><h2 className="mb-1 text-lg font-semibold text-white">Cargos</h2><p className="mb-5 text-sm text-zinc-400">Agrupe membros e defina as permissões de cada cargo.</p>{isOwner ? <ServerRolesPanel roles={roles} members={members} onCreate={onCreateRole} onSave={onSaveRole} onDelete={onDeleteRole} onToggleMember={onToggleRoleMember}/> : <div className="rounded-lg border border-amber-400/20 bg-amber-400/5 p-4 text-sm text-amber-200">Somente o dono do servidor pode criar cargos, atribuir membros e editar permissões.</div>}</section>}
-
-          {section === "access" && <section className="max-w-2xl"><h2 className="text-lg font-semibold text-white">Acesso e permissões</h2><p className="mt-1 text-sm text-zinc-400">As opções administrativas são exclusivas do proprietário.</p><div className="mt-5 space-y-3">{[{ title: "Editar perfil do servidor", detail: "Alterar nome, descrição e ícone", allowed: isOwner }, { title: "Gerenciar membros e cargos", detail: "Controlar quem participa e o que pode fazer", allowed: isOwner }, { title: "Acessar canais e conversar", detail: "Disponível para membros do servidor", allowed: true }].map((item) => <div key={item.title} className="flex items-center justify-between gap-4 rounded-lg border border-white/[0.08] bg-[#232428] p-4"><div><p className="text-sm font-semibold text-white">{item.title}</p><p className="mt-1 text-xs text-zinc-400">{item.detail}</p></div><span className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-semibold ${item.allowed ? "bg-emerald-500/10 text-emerald-300" : "bg-zinc-500/10 text-zinc-400"}`}>{item.allowed ? "Permitido" : "Somente dono"}</span></div>)}</div></section>}
-
-          <div className="mt-10 flex flex-wrap items-center justify-between gap-3 border-t border-white/10 pt-5">
-            <button onClick={onLeave} className="flex items-center gap-2 rounded-md px-3 py-2 text-sm text-rose-400 hover:bg-rose-500/10 md:hidden"><LogOut size={16}/> Sair do servidor</button>
-            <div className="ml-auto flex items-center gap-3">{notice && <span className="flex items-center gap-1.5 text-sm text-emerald-300"><Check size={15}/>{notice}</span>}{section === "profile" && <button disabled={!canEditServer} onClick={save} className="flex items-center gap-2 rounded-md bg-indigo-500 px-4 py-2.5 text-sm font-semibold text-white hover:bg-indigo-400 disabled:opacity-50"><Save size={16}/> Salvar alterações</button>}</div>
+      </div>
+      <div className="pb-3">
+        {tab === "overview" && (
+          <div className="space-y-5">
+            <div className="flex items-center gap-4">
+              <ImagePicker value={icon} onChange={setIcon} label="Ícone do servidor" />
+              <div className="flex-1">
+                <label htmlFor="s-name" className="label">Nome do servidor</label>
+                <input id="s-name" className="field" value={name} maxLength={100} onChange={(e) => setName(e.target.value)} />
+              </div>
+            </div>
+            {icon && <button className="text-[12px] text-ink-3 hover:text-danger" onClick={() => setIcon(null)}>Remover ícone</button>}
+            <div className="flex justify-end">
+              <button className="btn btn-primary" disabled={busy || !name.trim() || (name === server.name && icon === server.iconUrl)} onClick={() => void saveOverview()}>
+                {busy ? <Spinner /> : "Salvar alterações"}
+              </button>
+            </div>
           </div>
-        </div>
-      </main>
-    </div>
+        )}
+        {tab === "roles" && <RolesTab server={server} />}
+        {tab === "danger" && (
+          <div className="rounded-xl bg-danger/[0.06] p-4 ring-1 ring-inset ring-danger/25">
+            <div className="flex items-start gap-3">
+              <Shield size={20} className="mt-0.5 text-danger" />
+              <div>
+                <h3 className="text-[15px] font-semibold">Excluir {server.name}</h3>
+                <p className="mt-1 text-[13px] text-ink-3">Apaga canais, mensagens e cargos para todo mundo. Não tem volta.</p>
+              </div>
+            </div>
+            <label htmlFor="confirm-name" className="label mt-4">Digite o nome do servidor para confirmar</label>
+            <input id="confirm-name" className="field" value={confirmName} onChange={(e) => setConfirmName(e.target.value)} placeholder={server.name} />
+            <button className="btn btn-danger mt-3 w-full" disabled={confirmName !== server.name} onClick={() => void destroy()}>Excluir servidor</button>
+          </div>
+        )}
+      </div>
+    </Modal>
   );
 }

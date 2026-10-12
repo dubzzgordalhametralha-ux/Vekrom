@@ -85,6 +85,12 @@ export class MemRedis extends EventEmitter {
   async get(k: string): Promise<string | null> {
     return this.alive(k) ? (this.kv.get(k)?.v ?? null) : null;
   }
+  async mget(...ks: string[]): Promise<Array<string | null>> {
+    return Promise.all(ks.map((k) => this.get(k)));
+  }
+  async quit(): Promise<string> {
+    return "OK";
+  }
   async set(k: string, v: string, ...args: unknown[]): Promise<string | null> {
     let exMs: number | undefined;
     let nx = false;

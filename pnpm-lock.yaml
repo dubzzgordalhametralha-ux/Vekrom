@@ -7,10 +7,6 @@ settings:
 importers:
 
   .:
-    dependencies:
-      lucide-react:
-        specifier: ^1.48.0
-        version: 1.55.0(@types/react@18.3.31)(react@18.3.1)
     devDependencies:
       typescript:
         specifier: ^5.4.0
@@ -79,6 +75,9 @@ importers:
       jsonwebtoken:
         specifier: ^9.0.2
         version: 9.0.3
+      pg:
+        specifier: ^8.12.0
+        version: 8.23.1
       ws:
         specifier: ^8.18.0
         version: 8.22.0
@@ -89,6 +88,9 @@ importers:
       '@types/node':
         specifier: ^20.12.0
         version: 20.19.43
+      '@types/pg':
+        specifier: ^8.11.0
+        version: 8.23.1
       '@types/ws':
         specifier: ^8.5.10
         version: 8.18.2

@@ -1,5 +1,5 @@
 -- Vekrom canonical schema (Postgres 16)
--- Fonte única: apps/api/src/db/schema.sql
+-- Usado só pelo modo pg-mem (dev). Produção: migrations/ + `pnpm db:migrate`.
 -- migrations/001_init.sql deve espelhar este arquivo.
 
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
@@ -141,3 +141,25 @@ CREATE TABLE IF NOT EXISTS reactions (
   PRIMARY KEY (message_id, user_id, emoji)
 );
 CREATE INDEX IF NOT EXISTS idx_reactions_message ON reactions (message_id);
+
+-- ---------------------------------------------------------------- 004 (perfil, convites, índices)
+ALTER TABLE users
+  ADD COLUMN IF NOT EXISTS bio          VARCHAR(190),
+  ADD COLUMN IF NOT EXISTS banner_color VARCHAR(7);
+
+-- Nome de usuário vira identificador único (sem diferenciar maiúsculas), como no Discord atual.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_users_username_lower ON users (LOWER(username));
+
+CREATE TABLE IF NOT EXISTS invites (
+  code       VARCHAR(16) PRIMARY KEY,
+  server_id  BIGINT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  created_by BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  uses       INTEGER NOT NULL DEFAULT 0,
+  max_uses   INTEGER,
+  expires_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_invites_server ON invites (server_id);
+
+CREATE INDEX IF NOT EXISTS idx_dm_recipient_created ON direct_messages (recipient_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_refresh_tokens_expires ON refresh_tokens (expires_at);

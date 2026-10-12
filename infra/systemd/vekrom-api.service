@@ -1,0 +1,31 @@
+[Unit]
+Description=Vekrom api
+After=network.target postgresql.service redis-server.service
+Wants=postgresql.service redis-server.service
+
+[Service]
+User=vekrom
+WorkingDirectory=/home/vekrom/vekrom/apps/api
+EnvironmentFile=/home/vekrom/vekrom/.env
+Environment=PORT=3001
+Environment=HOST=127.0.0.1
+# Heap do V8 bem abaixo do MemoryMax: o GC trabalha antes do OOM killer.
+Environment=NODE_OPTIONS=--max-old-space-size=160
+ExecStart=/usr/bin/node dist/index.js
+Restart=always
+RestartSec=3
+KillSignal=SIGTERM
+TimeoutStopSec=15
+MemoryMax=350M
+# Endurecimento: só lê o sistema, só escreve nos uploads.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/vekrom/uploads
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

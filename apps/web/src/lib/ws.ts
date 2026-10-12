@@ -1,168 +1,144 @@
 /**
- * Native WebSocket gateway client (no socket.io).
- * Features: heartbeat, exponential reconnect, inbound batching.
+ * Cliente do gateway (WebSocket nativo).
+ * - IDENTIFY logo após abrir (token nunca vai na URL).
+ * - Heartbeat de aplicação a cada 25s; o servidor também pinga.
+ * - Reconexão com backoff exponencial + jitter (1s → 30s).
+ * - Token expirado (4004) ou recusado (4002): renova pelo refresh e reconecta.
  */
+import { refresh } from "./api";
 
-export type GatewayEvent =
-  | { t: 'MESSAGE_CREATE'; d: unknown }
-  | { t: 'MESSAGE_UPDATE'; d: unknown }
-  | { t: 'MESSAGE_DELETE'; d: { id: string; channelId: string } }
-  | { t: 'PRESENCE_UPDATE'; d: unknown }
-  | { t: 'TYPING_START'; d: { channelId: string; userId: string } }
-  | { t: 'VOICE_STATE'; d: unknown }
-  | { t: string; d: unknown };
-
+export interface GatewayEvent {
+  t: string;
+  d: any; // eslint-disable-line @typescript-eslint/no-explicit-any
+}
 type Handler = (evt: GatewayEvent) => void;
+export type GatewayStatus = "idle" | "connecting" | "ready" | "reconnecting";
 
-const GATEWAY_URL =
-  (import.meta.env.VITE_GATEWAY_URL as string | undefined) ?? 'ws://localhost:3002/ws';
-
+const GATEWAY_URL = import.meta.env.VITE_GATEWAY_URL ?? "ws://localhost:3002";
 const HEARTBEAT_MS = 25_000;
-const BATCH_WINDOW_MS = 120;
 const MAX_BACKOFF_MS = 30_000;
 
 export class GatewayClient {
   private ws: WebSocket | null = null;
   private token: string | null = null;
+  private status: () => string = () => "online";
   private handlers = new Set<Handler>();
-  private heartbeatTimer: number | null = null;
-  private reconnectAttempts = 0;
+  private statusHandlers = new Set<(s: GatewayStatus) => void>();
+  private heartbeat: number | null = null;
+  private attempts = 0;
   private reconnectTimer: number | null = null;
   private closedByUser = false;
-  private batch: GatewayEvent[] = [];
-  private batchTimer: number | null = null;
+  state: GatewayStatus = "idle";
 
-  connect(token: string): void {
+  connect(token: string, presence: () => string): void {
     this.token = token;
+    this.status = presence;
     this.closedByUser = false;
-    this.openSocket();
+    if (!this.ws) this.open();
+  }
+
+  /** Token novo: reidentifica no mesmo socket (o servidor revalida e estende a sessão). */
+  updateToken(token: string): void {
+    this.token = token;
+    if (this.state === "ready") this.send("IDENTIFY", { token });
   }
 
   disconnect(): void {
     this.closedByUser = true;
     this.clearTimers();
-    this.ws?.close(1000, 'client disconnect');
+    this.ws?.close(1000, "logout");
     this.ws = null;
+    this.setState("idle");
   }
 
-  send(type: string, data: unknown): void {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ t: type, d: data }));
-    }
+  send(t: string, d: unknown): void {
+    if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({ t, d }));
   }
 
   subscribe(fn: Handler): () => void {
     this.handlers.add(fn);
-    return () => {
-      this.handlers.delete(fn);
-    };
+    return () => void this.handlers.delete(fn);
   }
 
-  get connected(): boolean {
-    return this.ws?.readyState === WebSocket.OPEN;
+  onStatus(fn: (s: GatewayStatus) => void): () => void {
+    this.statusHandlers.add(fn);
+    return () => void this.statusHandlers.delete(fn);
   }
 
-  private openSocket(): void {
+  private setState(s: GatewayStatus) {
+    this.state = s;
+    this.statusHandlers.forEach((h) => h(s));
+  }
+
+  private open(): void {
     if (!this.token) return;
-    const url = `${GATEWAY_URL}?token=${encodeURIComponent(this.token)}`;
-    const ws = new WebSocket(url);
+    this.setState(this.attempts ? "reconnecting" : "connecting");
+    const ws = new WebSocket(GATEWAY_URL);
     this.ws = ws;
-
     ws.onopen = () => {
-      this.reconnectAttempts = 0;
-      this.startHeartbeat();
-      this.send('IDENTIFY', { token: this.token });
+      this.send("IDENTIFY", { token: this.token, status: this.status() });
+      this.heartbeat = window.setInterval(() => this.send("HEARTBEAT", null), HEARTBEAT_MS);
     };
-
-    ws.onmessage = (msg: MessageEvent<string>) => {
+    ws.onmessage = (m: MessageEvent<string>) => {
+      let evt: GatewayEvent;
       try {
-        const evt = JSON.parse(msg.data) as GatewayEvent;
-        if (evt.t === 'HELLO') {
-          return;
-        }
-        this.enqueue(evt);
+        evt = JSON.parse(m.data);
       } catch {
-        /* ignore malformed */
+        return;
+      }
+      if (!evt.t || evt.t === "HELLO" || evt.t === "HEARTBEAT_ACK") return;
+      if (evt.t === "READY") {
+        this.attempts = 0;
+        this.setState("ready");
+      }
+      for (const h of this.handlers) {
+        try {
+          h(evt);
+        } catch (err) {
+          console.error("[gateway] handler", err);
+        }
       }
     };
-
-    ws.onerror = () => {
-      /* onclose will handle reconnect */
-    };
-
-    ws.onclose = () => {
-      this.stopHeartbeat();
+    ws.onclose = async (e) => {
+      this.clearTimers();
+      if (this.ws === ws) this.ws = null;
       if (this.closedByUser) return;
+      if (e.code === 4002 || e.code === 4004) {
+        const r = await refresh();
+        if (!r) return this.setState("idle");
+        this.token = r.token;
+      }
       this.scheduleReconnect();
     };
   }
 
-  private enqueue(evt: GatewayEvent): void {
-    // Batch high-frequency events; dispatch low-frequency immediately.
-    if (evt.t === 'MESSAGE_CREATE' || evt.t === 'PRESENCE_UPDATE') {
-      this.batch.push(evt);
-      if (this.batchTimer === null) {
-        this.batchTimer = window.setTimeout(() => this.flush(), BATCH_WINDOW_MS);
-      }
-      return;
-    }
-    this.emit(evt);
-  }
-
-  private flush(): void {
-    this.batchTimer = null;
-    const items = this.batch.splice(0, this.batch.length);
-    for (const evt of items) this.emit(evt);
-  }
-
-  private emit(evt: GatewayEvent): void {
-    for (const h of this.handlers) {
-      try {
-        h(evt);
-      } catch {
-        /* handler error must not break gateway */
-      }
-    }
-  }
-
-  private startHeartbeat(): void {
-    this.stopHeartbeat();
-    this.heartbeatTimer = window.setInterval(() => {
-      this.send('HEARTBEAT', { at: Date.now() });
-    }, HEARTBEAT_MS);
-  }
-
-  private stopHeartbeat(): void {
-    if (this.heartbeatTimer !== null) {
-      window.clearInterval(this.heartbeatTimer);
-      this.heartbeatTimer = null;
-    }
+  /** Rede voltou: reconecta já, sem esperar o backoff. */
+  retryNow(): void {
+    if (this.closedByUser || this.ws || this.reconnectTimer === null) return;
+    window.clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    this.open();
   }
 
   private scheduleReconnect(): void {
     if (this.reconnectTimer !== null) return;
-    const backoff = Math.min(
-      MAX_BACKOFF_MS,
-      1000 * Math.pow(2, this.reconnectAttempts) + Math.random() * 500,
-    );
-    this.reconnectAttempts += 1;
+    this.setState("reconnecting");
+    const delay = Math.min(MAX_BACKOFF_MS, 1000 * 2 ** this.attempts) * (0.75 + Math.random() * 0.5);
+    this.attempts += 1;
     this.reconnectTimer = window.setTimeout(() => {
       this.reconnectTimer = null;
-      if (!this.closedByUser) this.openSocket();
-    }, backoff);
+      if (!this.closedByUser) this.open();
+    }, delay);
   }
 
   private clearTimers(): void {
-    this.stopHeartbeat();
-    if (this.reconnectTimer !== null) {
-      window.clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
-    if (this.batchTimer !== null) {
-      window.clearTimeout(this.batchTimer);
-      this.batchTimer = null;
-    }
+    if (this.heartbeat !== null) window.clearInterval(this.heartbeat);
+    this.heartbeat = null;
+    if (this.reconnectTimer !== null) window.clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
   }
 }
 
 export const gateway = new GatewayClient();
+
+if (typeof window !== "undefined") window.addEventListener("online", () => gateway.retryNow());

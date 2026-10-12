@@ -61,6 +61,9 @@ export class MemRedis extends EventEmitter {
     return true;
   }
 
+  async quit(): Promise<string> {
+    return "OK";
+  }
   async ping(): Promise<string> {
     return "PONG";
   }

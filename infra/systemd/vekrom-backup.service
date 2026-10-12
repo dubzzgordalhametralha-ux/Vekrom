@@ -1,0 +1,10 @@
+[Unit]
+Description=Vekrom backup (pg_dump + uploads)
+After=postgresql.service
+
+[Service]
+Type=oneshot
+User=vekrom
+ExecStart=/home/vekrom/vekrom/scripts/backup.sh
+Nice=10
+IOSchedulingClass=idle

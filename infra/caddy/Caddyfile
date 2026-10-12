@@ -1,0 +1,50 @@
+# Vekrom: Caddy na frente de tudo (HTTPS automático).
+# Troque o domínio abaixo quando tiver domínio próprio e rode: sudo systemctl reload caddy
+144-33-6-56.sslip.io {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		X-Frame-Options "DENY"
+		Permissions-Policy "camera=(self), microphone=(self), display-capture=(self), geolocation=(), payment=()"
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' wss://{host}; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
+		-Server
+	}
+
+	# Uploads direto do disco: nomes aleatórios (uuid), conteúdo imutável -> cache de 1 ano.
+	# sandbox impede que um arquivo rode script mesmo se for aberto direto.
+	handle_path /api/files/* {
+		root * /home/vekrom/uploads
+		@valid path_regexp ^/[0-9a-f-]{36}\.(png|jpg|gif|webp|wav|ogg|flac|mp3|m4a|mp4)$
+		handle @valid {
+			header Cache-Control "public, max-age=31536000, immutable"
+			header Content-Security-Policy "default-src 'none'; sandbox"
+			file_server
+		}
+		respond 404
+	}
+
+	handle_path /api/* {
+		reverse_proxy 127.0.0.1:3001
+	}
+
+	handle /ws* {
+		reverse_proxy 127.0.0.1:3002
+	}
+
+	# Assets com hash no nome: cache longo. index.html: sempre revalida.
+	handle /assets/* {
+		root * /home/vekrom/vekrom/apps/web/dist
+		header Cache-Control "public, max-age=31536000, immutable"
+		file_server
+	}
+
+	handle {
+		root * /home/vekrom/vekrom/apps/web/dist
+		try_files {path} /index.html
+		header Cache-Control "no-cache"
+		file_server
+	}
+}

@@ -1,44 +1,30 @@
-import type { WebSocket } from 'ws';
+import type { WebSocket } from "ws";
 
 /** Sessão de um socket autenticado. */
 export interface Session {
   connectionId: string;
   userId: string;
+  username: string;
   socket: WebSocket;
-  channels: Set<string>;
-  seq: number;
-  lastHeartbeat: number;
-  identified: boolean;
+  /** Servidores dos quais o usuário é membro (carregado no IDENTIFY, atualizado por eventos). */
+  servers: Set<string>;
+  friends: Set<string>;
+  status: string;
+  expiresAt: number;
 }
 
-/**
- * Store em memória (por instância) de sessões.
- * Cluster-ready: presença/canais "quentes" ficam no Redis (presence.ts / pubsub.ts);
- * aqui guardamos apenas sockets locais para broadcast direcionado.
- */
+/** Sessões locais desta instância. Roteamento é O(n) por evento. */
+// ponytail: varredura linear; índice serverId -> sessões quando passar de alguns milhares de conexões.
 export class SessionStore {
   private byConnection = new Map<string, Session>();
-  private byUser = new Map<string, Set<string>>();
 
-  add(session: Session): void {
-    this.byConnection.set(session.connectionId, session);
-    let set = this.byUser.get(session.userId);
-    if (!set) {
-      set = new Set();
-      this.byUser.set(session.userId, set);
-    }
-    set.add(session.connectionId);
+  add(s: Session): void {
+    this.byConnection.set(s.connectionId, s);
   }
 
   remove(connectionId: string): Session | undefined {
     const s = this.byConnection.get(connectionId);
-    if (!s) return undefined;
     this.byConnection.delete(connectionId);
-    const set = this.byUser.get(s.userId);
-    if (set) {
-      set.delete(connectionId);
-      if (set.size === 0) this.byUser.delete(s.userId);
-    }
     return s;
   }
 
@@ -46,29 +32,21 @@ export class SessionStore {
     return this.byConnection.get(connectionId);
   }
 
-  /** Todos os connectionIds de um usuário (multi-device). */
-  connectionsOfUser(userId: string): string[] {
-    return [...(this.byUser.get(userId) ?? [])];
+  ofUser(userId: string): Session[] {
+    return [...this.byConnection.values()].filter((s) => s.userId === userId);
   }
 
-  /** Sockets locais inscritos num canal de texto. */
-  subscribersOf(channelId: string): Session[] {
-    const out: Session[] = [];
-    for (const s of this.byConnection.values()) {
-      if (s.identified && s.channels.has(channelId)) out.push(s);
-    }
-    return out;
+  inServer(serverId: string): Session[] {
+    return [...this.byConnection.values()].filter((s) => s.servers.has(serverId));
   }
 
-  subscribe(connectionId: string, channelId: string): void {
-    this.byConnection.get(connectionId)?.channels.add(channelId);
+  /** Quem pode ver a presença de `userId`: divide servidor ou é amigo. */
+  audienceOf(userId: string, servers: Set<string>, friends: Set<string>): Session[] {
+    return [...this.byConnection.values()].filter(
+      (s) => s.userId === userId || friends.has(s.userId) || [...s.servers].some((id) => servers.has(id)),
+    );
   }
 
-  unsubscribe(connectionId: string, channelId: string): void {
-    this.byConnection.get(connectionId)?.channels.delete(channelId);
-  }
-
-  /** Todas as sessões locais (para broadcast de presença/voz). */
   all(): Iterable<Session> {
     return this.byConnection.values();
   }

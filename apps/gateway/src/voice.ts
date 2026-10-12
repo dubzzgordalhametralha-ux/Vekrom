@@ -79,26 +79,6 @@ export class VoiceManager {
     return st;
   }
 
-  /** Aplica estado vindo de outra instância (relay). */
-  applyRemote(state: VoiceState): void {
-    // remove de outros canais (single-channel invariant)
-    for (const [cid, members] of this.channels.entries()) {
-      if (cid !== state.channelId) members.delete(state.userId);
-    }
-    let members = this.channels.get(state.channelId);
-    if (!members) {
-      members = new Map();
-      this.channels.set(state.channelId, members);
-    }
-    members.set(state.userId, state);
-  }
-
-  applyRemoteLeave(userId: string, channelId: string): void {
-    const members = this.channels.get(channelId);
-    members?.delete(userId);
-    if (members && members.size === 0) this.channels.delete(channelId);
-  }
-
   participants(channelId: string): VoiceState[] {
     return [...(this.channels.get(channelId)?.values() ?? [])];
   }
